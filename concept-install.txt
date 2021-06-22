@@ -1,0 +1,185 @@
+# Monitoring Linux Logs with Kibana and Rsyslog
+--------------------------------------
+## Key concepts of Linux logging
+
+Before detailing how our log monitoring architecture looks like, let’s go back in time for a second.
+
+Historically, Linux logging starts with syslog.
+
+Syslog is a protocol developed in 1980 which aims at standardizing the way logs are formatted, not only for Linux, but for any system exchanging logs.
+
+From there, syslog servers were developed and were embedded with the capability of handling syslog messages.
+
+They rapidly evolved to functionalities such as filtering, having content routing abilities, or probably one of the key features of such servers : storing logs and rotating them.
+
+Rsyslog was developed keeping this key functionality in mind : having a modular and customizable way to handle logs.
+
+The modularity would be handled with modules and the customization with log templates.
+
+In a way, rsyslog can ingest logs from many different sources and it can forward them to an even wider set of destinations. This is what we are going to use in our tutorial.
+--------------------------------------
+# Installing Java on Ubuntu
+$ sudo apt-get install default-jre
+--------------------------------------
+# At the time of this tutorial, this instance runs the OpenJDK version 11.
+
+ubuntu:~$ java -version
+openjdk version "11.0.3" 2019-04-16
+OpenJDK Runtime Environment (build 11.0.3+7-Ubuntu-1ubuntu218.04.1)
+OpenJDK 64-Bit Server VM (build 11.0.3+7-Ubuntu-1ubuntu218.04.1, mixed mode, sharing)
+--------------------------------------
+# Adding Elastic packages to your instance
+$ wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | sudo apt-key add -
+--------------------------------------
+$ echo "deb https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee -a /etc/apt/sources.list.d/elastic-7.x.list
+
+$ cat /etc/apt/sources.list.d/elastic-7.x.list
+deb https://artifacts.elastic.co/packages/7.x/apt stable main
+
+$ sudo apt-get update
+--------------------------------------
+# Installing ElasticSearch
+$ sudo apt-get install elasticsearch
+--------------------------------------
+$ sudo systemctl start elasticsearch
+● elasticsearch.service - Elasticsearch
+   Loaded: loaded (/usr/lib/systemd/system/elasticsearch.service; disabled; vendor preset: enabled)
+   Active: active (running) since Mon 2019-07-08 18:19:45 UTC; 2 days ago
+     Docs: http://www.elastic.co
+--------------------------------------
+$ sudo lsof -i -P -n | grep LISTEN | grep 9200
+java      10667   elasticsearch  212u  IPv6 1159208890      0t0  TCP [::1]:9200 (LISTEN)
+java      10667   elasticsearch  213u  IPv6 1159208891      0t0  TCP 127.0.0.1:9200 (LISTEN)
+--------------------------------------
+$ curl -XGET 'http://localhost:9200/_all/_search?q=*&pretty'
+--------------------------------------
+# Installing Logstash
+
+$ sudo apt-get install logstash
+--------------------------------------
+$ sudo systemctl status logstash
+$ sudo systemctl start logstash
+
+--------------------------------------
+$ sudo lsof -i -P -n | grep LISTEN | grep 9600
+java      28872        logstash   79u  IPv6 1160098941      0t0  TCP 127.0.0.1:9600 (LISTEN)
+--------------------------------------
+# Installing Kibana
+
+ sudo apt-get install kibana
+--------------------------------------
+
+$ sudo systemctl start kibana
+$ sudo lsof -i -P -n | grep LISTEN | grep 5601
+node       7253          kibana   18u  IPv4 1159451844      0t0  TCP *:5601 (LISTEN)
+
+--------------------------------------
+
+//logstash.conf
+input {                                                                                      
+  udp {                                                                                      
+    host => "127.0.0.1"                                                                      
+    port => 10514                                                                            
+    codec => "json"                                                                          
+    type => "rsyslog"                                                                        
+  }                                                                                          
+}                                                                                            
+                                                                                             
+# The Filter pipeline stays empty here, no formatting is done.                                                                                           
+filter { }                                                                                   
+                                                                                             
+# Every single log will be forwarded to ElasticSearch. If you are using another port, you should specify it here.                                                                                             
+output {                                                                                     
+  if [type] == "rsyslog" {                                                                   
+    elasticsearch {                                                                          
+      hosts => [ "127.0.0.1:9200" ]                                                          
+    }                                                                                        
+  }                                                                                          
+}
+
+
+--------------------------------------
+
+sudo systemctl restart logstash
+
+--------------------------------------
+
+"/etc/rsyslog.d" and create a new file named "70-output.conf"
+
+Inside your file, write the following content:
+
+# This line sends all lines to defined IP address at port 10514
+# using the json-template format.
+
+*.*                         @127.0.0.1:10514;json-template
+
+--------------------------------------
+Now that you have log forwarding, create a "01-json-template.conf" file in the same folder, and paste the following content:
+
+template(name="json-template"
+  type="list") {
+    constant(value="{")
+      constant(value="\"@timestamp\":\"")     property(name="timereported" dateFormat="rfc3339")
+      constant(value="\",\"@version\":\"1")
+      constant(value="\",\"message\":\"")     property(name="msg" format="json")
+      constant(value="\",\"sysloghost\":\"")  property(name="hostname")
+      constant(value="\",\"severity\":\"")    property(name="syslogseverity-text")
+      constant(value="\",\"facility\":\"")    property(name="syslogfacility-text")
+      constant(value="\",\"programname\":\"") property(name="programname")
+      constant(value="\",\"procid\":\"")      property(name="procid")
+    constant(value="\"}\n")
+}
+
+--------------------------------------
+As you probably guessed it, for every incoming message, rsyslog will interpolate log properties into a JSON formatted message, and forward it to Logstash, listening on port 10514.
+
+Restart your rsyslog service, and verify that logs are correctly forwarded to ElasticSearch.
+
+Note : logs will be forwarded in an index called logstash-*.
+
+$ sudo systemctl restart rsyslog
+$ curl -XGET 'http://localhost:9200/logstash-*/_search?q=*&pretty'
+{
+  "took": 2,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 10000,
+      "relation": "gte"
+    },
+    "max_score": 1,
+    "hits": [
+      {
+        "_index": "logstash-2019.07.08-000001",
+        "_type": "_doc",
+        "_id": "GEBK1WsBQwXNQFYwP8D_",
+        "_score": 1,
+        "_source": {
+          "host": "127.0.0.1",
+          "severity": "info",
+          "programname": "memory_usage",
+          "facility": "user",
+          "@timestamp": "2019-07-09T05:52:21.402Z",
+          "sysloghost": "schkn-ubuntu",
+          "message": "                                  Dload  Upload   Total   Spent    Left  Speed",
+          "@version": "1",
+          "procid": "16780",
+          "type": "rsyslog"
+        }
+      }
+    ]
+  }
+}
+
+--------------------------------------
+A Few Words On Kibana
+
+Head over to Kibana (on http://localhost:5601), and you should see the following screen.
+
+--------------------------------------
