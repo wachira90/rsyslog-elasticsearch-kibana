@@ -1,5 +1,5 @@
 FROM centos:7
-MAINTAINER "Peter Schiffer" <pschiffe@redhat.com>
+MAINTAINER "Wachira" <wachira90@yahoo.com>
 
 COPY rsyslog/rsyslog-copr.repo /etc/yum.repos.d/rsyslog-copr.repo
 COPY elasticsearch/elasticsearch.repo /etc/yum.repos.d/elasticsearch.repo
